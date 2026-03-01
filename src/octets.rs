@@ -27,6 +27,8 @@ use crate::octet::OCTET_MUL_HI_BITS;
 use crate::octet::OCTET_MUL_LOW_BITS;
 use crate::octet::Octet;
 
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+use std::arch::asm;
 #[cfg(all(target_arch = "aarch64", feature = "std"))]
 use std::arch::is_aarch64_feature_detected;
 
@@ -286,6 +288,71 @@ fn mulassign_scalar_fallback(octets: &mut [u8], scalar: &Octet) {
     }
 }
 
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
+fn gfni_scalar_mul_matrix(scalar: &Octet) -> u64 {
+    let scalar_index = usize::from(scalar.byte());
+    let mut matrix = 0u64;
+    for output_bit in 0..8 {
+        let mut row_mask = 0u8;
+        for input_bit in 0..8 {
+            let basis_input = 1u8 << input_bit;
+            let product = unsafe {
+                *OCTET_MUL
+                    .get_unchecked(scalar_index)
+                    .get_unchecked(usize::from(basis_input))
+            };
+            if ((product >> output_bit) & 1) != 0 {
+                row_mask |= 1 << input_bit;
+            }
+        }
+        matrix |= u64::from(row_mask) << (output_bit * 8);
+    }
+    matrix
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+unsafe fn gfni_affine_mul_xmm(
+    input: std::arch::x86_64::__m128i,
+    matrix: std::arch::x86_64::__m128i,
+) -> std::arch::x86_64::__m128i {
+    let result: std::arch::x86_64::__m128i;
+    unsafe {
+        asm!(
+            "vgf2p8affineqb {result}, {input}, {matrix}, 0",
+            result = lateout(xmm_reg) result,
+            input = in(xmm_reg) input,
+            matrix = in(xmm_reg) matrix,
+            options(pure, nomem, nostack)
+        );
+    }
+    result
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+unsafe fn mulassign_scalar_gfni(octets: &mut [u8], scalar: &Octet) {
+    unsafe {
+        use std::arch::x86_64::*;
+
+        let self_ptr = octets.as_mut_ptr();
+        let scalar_index = scalar.byte() as usize;
+        let matrix = _mm_set1_epi64x(gfni_scalar_mul_matrix(scalar) as i64);
+        for i in 0..(octets.len() / 16) {
+            #[allow(clippy::cast_ptr_alignment)]
+            let input = _mm_loadu_si128((self_ptr as *const __m128i).add(i));
+            let result = gfni_affine_mul_xmm(input, matrix);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm_storeu_si128((self_ptr as *mut __m128i).add(i), result);
+        }
+
+        let remainder = octets.len() % 16;
+        for i in (octets.len() - remainder)..octets.len() {
+            *octets.get_unchecked_mut(i) = *OCTET_MUL
+                .get_unchecked(scalar_index)
+                .get_unchecked(*octets.get_unchecked(i) as usize);
+        }
+    }
+}
+
 // TODO: enable when stable
 #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "std"))]
 // #[target_feature(enable = "neon")]
@@ -416,6 +483,14 @@ unsafe fn mulassign_scalar_ssse3(octets: &mut [u8], scalar: &Octet) {
 }
 
 pub fn mulassign_scalar(octets: &mut [u8], scalar: &Octet) {
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("gfni") {
+            unsafe {
+                return mulassign_scalar_gfni(octets, scalar);
+            }
+        }
+    }
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
     {
         if is_x86_feature_detected!("avx2") {
@@ -455,6 +530,35 @@ fn fused_addassign_mul_scalar_fallback(octets: &mut [u8], other: &[u8], scalar: 
     for (i, octet) in octets.iter_mut().enumerate() {
         unsafe {
             *octet ^= *OCTET_MUL
+                .get_unchecked(scalar_index)
+                .get_unchecked(*other.get_unchecked(i) as usize);
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "std"))]
+unsafe fn fused_addassign_mul_scalar_gfni(octets: &mut [u8], other: &[u8], scalar: &Octet) {
+    unsafe {
+        use std::arch::x86_64::*;
+
+        let self_ptr = octets.as_mut_ptr();
+        let other_ptr = other.as_ptr();
+        let scalar_index = scalar.byte() as usize;
+        let matrix = _mm_set1_epi64x(gfni_scalar_mul_matrix(scalar) as i64);
+        for i in 0..(octets.len() / 16) {
+            #[allow(clippy::cast_ptr_alignment)]
+            let other_vec = _mm_loadu_si128((other_ptr as *const __m128i).add(i));
+            let product = gfni_affine_mul_xmm(other_vec, matrix);
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm_loadu_si128((self_ptr as *const __m128i).add(i));
+            let result = _mm_xor_si128(self_vec, product);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm_storeu_si128((self_ptr as *mut __m128i).add(i), result);
+        }
+
+        let remainder = octets.len() % 16;
+        for i in (octets.len() - remainder)..octets.len() {
+            *octets.get_unchecked_mut(i) ^= *OCTET_MUL
                 .get_unchecked(scalar_index)
                 .get_unchecked(*other.get_unchecked(i) as usize);
         }
@@ -624,6 +728,14 @@ pub fn fused_addassign_mul_scalar(octets: &mut [u8], other: &[u8], scalar: &Octe
     );
 
     assert_eq!(octets.len(), other.len());
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    {
+        if is_x86_feature_detected!("gfni") {
+            unsafe {
+                return fused_addassign_mul_scalar_gfni(octets, other, scalar);
+            }
+        }
+    }
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
     {
         if is_x86_feature_detected!("avx2") {
@@ -874,6 +986,8 @@ mod tests {
     use rand::Rng;
     use std::vec::Vec;
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    use crate::octet::OCTET_MUL;
     use crate::octet::Octet;
     use crate::octets::mulassign_scalar;
     use crate::octets::{
@@ -938,5 +1052,33 @@ mod tests {
         fused_addassign_mul_scalar_binary(&mut data1, &binary_octet_vec, &scalar);
 
         assert_eq!(expected, data1);
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn apply_gfni_affine_matrix(matrix: u64, input: u8) -> u8 {
+        let mut output = 0u8;
+        for output_bit in 0..8 {
+            let row = ((matrix >> (output_bit * 8)) & 0xFF) as u8;
+            let parity = ((row & input).count_ones() & 1) as u8;
+            output |= parity << output_bit;
+        }
+        output
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn gfni_scalar_matrix_matches_mul_table() {
+        for scalar in 0..=255u8 {
+            let matrix = super::gfni_scalar_mul_matrix(&Octet::new(scalar));
+            for input in 0..=255u8 {
+                let expected = unsafe {
+                    *OCTET_MUL
+                        .get_unchecked(scalar as usize)
+                        .get_unchecked(input as usize)
+                };
+                let actual = apply_gfni_affine_matrix(matrix, input);
+                assert_eq!(actual, expected);
+            }
+        }
     }
 }
