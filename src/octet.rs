@@ -7,78 +7,83 @@ use core::ops::{Add, AddAssign, Div, Mul, Sub};
 #[cfg(feature = "serde_support")]
 use serde::{Deserialize, Serialize};
 
-// As defined in section 5.7.3
-#[rustfmt::skip]
-const OCT_EXP: [u8; 510] = [
-   1, 2, 4, 8, 16, 32, 64, 128, 29, 58, 116, 232, 205, 135, 19, 38, 76,
-   152, 45, 90, 180, 117, 234, 201, 143, 3, 6, 12, 24, 48, 96, 192, 157,
-   39, 78, 156, 37, 74, 148, 53, 106, 212, 181, 119, 238, 193, 159, 35,
-   70, 140, 5, 10, 20, 40, 80, 160, 93, 186, 105, 210, 185, 111, 222,
-   161, 95, 190, 97, 194, 153, 47, 94, 188, 101, 202, 137, 15, 30, 60,
-   120, 240, 253, 231, 211, 187, 107, 214, 177, 127, 254, 225, 223, 163,
-   91, 182, 113, 226, 217, 175, 67, 134, 17, 34, 68, 136, 13, 26, 52,
-   104, 208, 189, 103, 206, 129, 31, 62, 124, 248, 237, 199, 147, 59,
-   118, 236, 197, 151, 51, 102, 204, 133, 23, 46, 92, 184, 109, 218,
-   169, 79, 158, 33, 66, 132, 21, 42, 84, 168, 77, 154, 41, 82, 164, 85,
-   170, 73, 146, 57, 114, 228, 213, 183, 115, 230, 209, 191, 99, 198,
-   145, 63, 126, 252, 229, 215, 179, 123, 246, 241, 255, 227, 219, 171,
-   75, 150, 49, 98, 196, 149, 55, 110, 220, 165, 87, 174, 65, 130, 25,
-   50, 100, 200, 141, 7, 14, 28, 56, 112, 224, 221, 167, 83, 166, 81,
-   162, 89, 178, 121, 242, 249, 239, 195, 155, 43, 86, 172, 69, 138, 9,
-   18, 36, 72, 144, 61, 122, 244, 245, 247, 243, 251, 235, 203, 139, 11,
-   22, 44, 88, 176, 125, 250, 233, 207, 131, 27, 54, 108, 216, 173, 71,
-   142, 1, 2, 4, 8, 16, 32, 64, 128, 29, 58, 116, 232, 205, 135, 19, 38,
-   76, 152, 45, 90, 180, 117, 234, 201, 143, 3, 6, 12, 24, 48, 96, 192,
-   157, 39, 78, 156, 37, 74, 148, 53, 106, 212, 181, 119, 238, 193, 159,
-   35, 70, 140, 5, 10, 20, 40, 80, 160, 93, 186, 105, 210, 185, 111,
-   222, 161, 95, 190, 97, 194, 153, 47, 94, 188, 101, 202, 137, 15, 30,
-   60, 120, 240, 253, 231, 211, 187, 107, 214, 177, 127, 254, 225, 223,
-   163, 91, 182, 113, 226, 217, 175, 67, 134, 17, 34, 68, 136, 13, 26,
-   52, 104, 208, 189, 103, 206, 129, 31, 62, 124, 248, 237, 199, 147,
-   59, 118, 236, 197, 151, 51, 102, 204, 133, 23, 46, 92, 184, 109, 218,
-   169, 79, 158, 33, 66, 132, 21, 42, 84, 168, 77, 154, 41, 82, 164, 85,
-   170, 73, 146, 57, 114, 228, 213, 183, 115, 230, 209, 191, 99, 198,
-   145, 63, 126, 252, 229, 215, 179, 123, 246, 241, 255, 227, 219, 171,
-   75, 150, 49, 98, 196, 149, 55, 110, 220, 165, 87, 174, 65, 130, 25,
-   50, 100, 200, 141, 7, 14, 28, 56, 112, 224, 221, 167, 83, 166, 81,
-   162, 89, 178, 121, 242, 249, 239, 195, 155, 43, 86, 172, 69, 138, 9,
-   18, 36, 72, 144, 61, 122, 244, 245, 247, 243, 251, 235, 203, 139, 11,
-   22, 44, 88, 176, 125, 250, 233, 207, 131, 27, 54, 108, 216, 173, 71,
-   142];
+// GFNI multiplies bytes in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1 (0x11B).
+// RFC 6330 uses a different field, so the whole codec needs to move to this field in order for
+// encoder and decoder to stay algebraically consistent.
+const FIELD_POLYNOMIAL: u16 = 0x11B;
+const FIELD_REDUCTION: u8 = (FIELD_POLYNOMIAL & 0xFF) as u8;
+// In the GFNI field, 0x02 has multiplicative order 51, so alpha must use a different primitive
+// element. 0x03 generates all 255 non-zero elements.
+const FIELD_GENERATOR: u8 = 0x03;
 
-// As defined in section 5.7.4, but with a prepended zero to make this zero indexed
-#[rustfmt::skip]
-const OCT_LOG: [u8; 256] = [
-   0, 0, 1, 25, 2, 50, 26, 198, 3, 223, 51, 238, 27, 104, 199, 75, 4, 100,
-   224, 14, 52, 141, 239, 129, 28, 193, 105, 248, 200, 8, 76, 113, 5,
-   138, 101, 47, 225, 36, 15, 33, 53, 147, 142, 218, 240, 18, 130, 69,
-   29, 181, 194, 125, 106, 39, 249, 185, 201, 154, 9, 120, 77, 228, 114,
-   166, 6, 191, 139, 98, 102, 221, 48, 253, 226, 152, 37, 179, 16, 145,
-   34, 136, 54, 208, 148, 206, 143, 150, 219, 189, 241, 210, 19, 92,
-   131, 56, 70, 64, 30, 66, 182, 163, 195, 72, 126, 110, 107, 58, 40,
-   84, 250, 133, 186, 61, 202, 94, 155, 159, 10, 21, 121, 43, 78, 212,
-   229, 172, 115, 243, 167, 87, 7, 112, 192, 247, 140, 128, 99, 13, 103,
-   74, 222, 237, 49, 197, 254, 24, 227, 165, 153, 119, 38, 184, 180,
-   124, 17, 68, 146, 217, 35, 32, 137, 46, 55, 63, 209, 91, 149, 188,
-   207, 205, 144, 135, 151, 178, 220, 252, 190, 97, 242, 86, 211, 171,
-   20, 42, 93, 158, 132, 60, 57, 83, 71, 109, 65, 162, 31, 45, 67, 216,
-   183, 123, 164, 118, 196, 23, 73, 236, 127, 12, 111, 246, 108, 161,
-   59, 82, 41, 157, 85, 170, 251, 96, 134, 177, 187, 204, 62, 90, 203,
-   89, 95, 176, 156, 169, 160, 81, 11, 245, 22, 235, 122, 117, 44, 215,
-   79, 174, 213, 233, 230, 231, 173, 232, 116, 214, 244, 234, 168, 80,
-   88, 175];
+const fn field_mul(mut x: u8, mut y: u8) -> u8 {
+    let mut result = 0;
+    let mut i = 0;
+    while i < 8 {
+        if y & 1 != 0 {
+            result ^= x;
+        }
+
+        let carry = x & 0x80;
+        x <<= 1;
+        if carry != 0 {
+            x ^= FIELD_REDUCTION;
+        }
+
+        y >>= 1;
+        i += 1;
+    }
+
+    result
+}
+
+const fn calculate_octet_exp_table() -> [u8; 510] {
+    let mut result = [0; 510];
+    let mut value = 1;
+    let mut i = 0;
+
+    while i < 255 {
+        result[i] = value;
+        value = field_mul(value, FIELD_GENERATOR);
+        i += 1;
+    }
+
+    while i < result.len() {
+        result[i] = result[i - 255];
+        i += 1;
+    }
+
+    result
+}
+
+const fn calculate_octet_log_table() -> [u8; 256] {
+    let mut result = [0; 256];
+    let mut value = 1;
+    let mut i = 0;
+
+    while i < 255 {
+        result[value as usize] = i as u8;
+        value = field_mul(value, FIELD_GENERATOR);
+        i += 1;
+    }
+
+    result
+}
+
+const OCT_EXP: [u8; 510] = calculate_octet_exp_table();
+const OCT_LOG: [u8; 256] = calculate_octet_log_table();
 
 pub static OCTET_MUL: [[u8; 256]; 256] = calculate_octet_mul_table();
 
 // See "Screaming Fast Galois Field Arithmetic Using Intel SIMD Instructions" by Plank et al.
-// Further adapted to AVX2
+// Further adapted to AVX2.
 #[cfg(any(feature = "std", test))]
 pub const OCTET_MUL_HI_BITS: [[u8; 32]; 256] = calculate_octet_mul_hi_table();
 #[cfg(any(feature = "std", test))]
 pub const OCTET_MUL_LOW_BITS: [[u8; 32]; 256] = calculate_octet_mul_low_table();
 
 const fn const_mul(x: usize, y: usize) -> u8 {
-    return OCT_EXP[OCT_LOG[x] as usize + OCT_LOG[y] as usize];
+    field_mul(x as u8, y as u8)
 }
 
 #[cfg(any(feature = "std", test))]
@@ -94,7 +99,7 @@ const fn calculate_octet_mul_hi_table() -> [[u8; 32]; 256] {
         }
         i += 1;
     }
-    return result;
+    result
 }
 
 #[cfg(any(feature = "std", test))]
@@ -110,7 +115,7 @@ const fn calculate_octet_mul_low_table() -> [[u8; 32]; 256] {
         }
         i += 1;
     }
-    return result;
+    result
 }
 
 const fn calculate_octet_mul_table() -> [[u8; 256]; 256] {
@@ -124,7 +129,7 @@ const fn calculate_octet_mul_table() -> [[u8; 256]; 256] {
         }
         i += 1;
     }
-    return result;
+    result
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord, Hash)]
@@ -158,10 +163,10 @@ impl Octet {
     pub fn fma(&mut self, other1: &Octet, other2: &Octet) {
         if other1.value != 0 && other2.value != 0 {
             unsafe {
-                // This is safe because value is a u8, and OCT_LOG is 256 elements long
+                // This is safe because the values are u8s and the exp/log tables cover every
+                // non-zero field element in the GFNI field.
                 let log_u = *OCT_LOG.get_unchecked(other1.value as usize) as usize;
                 let log_v = *OCT_LOG.get_unchecked(other2.value as usize) as usize;
-                // This is safe because the sum of two values in OCT_LOG cannot exceed 509
                 self.value ^= *OCT_EXP.get_unchecked(log_u + log_v)
             }
         }
@@ -174,7 +179,6 @@ impl Add for Octet {
     #[allow(clippy::suspicious_arithmetic_impl)]
     fn add(self, other: Octet) -> Octet {
         Octet {
-            // As defined in section 5.7.2, addition on octets is implemented as bitxor
             value: self.value ^ other.value,
         }
     }
@@ -186,7 +190,6 @@ impl<'b> Add<&'b Octet> for &Octet {
     #[allow(clippy::suspicious_arithmetic_impl)]
     fn add(self, other: &'b Octet) -> Octet {
         Octet {
-            // As defined in section 5.7.2, addition on octets is implemented as bitxor
             value: self.value ^ other.value,
         }
     }
@@ -212,7 +215,6 @@ impl Sub for Octet {
     #[allow(clippy::suspicious_arithmetic_impl)]
     fn sub(self, rhs: Octet) -> Octet {
         Octet {
-            // As defined in section 5.7.2, subtraction on octets is implemented as bitxor
             value: self.value ^ rhs.value,
         }
     }
@@ -231,15 +233,12 @@ impl<'b> Mul<&'b Octet> for &Octet {
 
     #[allow(clippy::suspicious_arithmetic_impl)]
     fn mul(self, other: &'b Octet) -> Octet {
-        // As defined in section 5.7.2, multiplication is implemented via the tables above
         if self.value == 0 || other.value == 0 {
             Octet { value: 0 }
         } else {
             unsafe {
-                // This is safe because value is a u8, and OCT_LOG is 256 elements long
                 let log_u = *OCT_LOG.get_unchecked(self.value as usize) as usize;
                 let log_v = *OCT_LOG.get_unchecked(other.value as usize) as usize;
-                // This is safe because the sum of two values in OCT_LOG cannot exceed 509
                 Octet {
                     value: *OCT_EXP.get_unchecked(log_u + log_v),
                 }
@@ -262,7 +261,6 @@ impl<'b> Div<&'b Octet> for &Octet {
     #[allow(clippy::suspicious_arithmetic_impl)]
     fn div(self, rhs: &'b Octet) -> Octet {
         assert_ne!(0, rhs.value);
-        // As defined in section 5.7.2, division is implemented via the tables above
         if self.value == 0 {
             Octet { value: 0 }
         } else {
@@ -279,6 +277,7 @@ impl<'b> Div<&'b Octet> for &Octet {
 mod tests {
     use rand::Rng;
 
+    use crate::octet::FIELD_GENERATOR;
     use crate::octet::OCT_EXP;
     use crate::octet::OCT_LOG;
     use crate::octet::OCTET_MUL_HI_BITS;
@@ -302,7 +301,6 @@ mod tests {
         let octet = Octet {
             value: rand::rng().random(),
         };
-        // See section 5.7.2. u is its own additive inverse
         assert_eq!(Octet::zero(), &octet + &octet);
     }
 
@@ -348,5 +346,26 @@ mod tests {
                 assert_eq!(result, fma_result);
             }
         }
+    }
+
+    #[test]
+    fn aes_field_example() {
+        assert_eq!(0xFE, (Octet::new(0x57) * Octet::new(0x13)).byte());
+    }
+
+    #[test]
+    fn alpha_uses_full_order_generator() {
+        let mut seen = [false; 256];
+        for i in 0..255 {
+            let value = Octet::alpha(i).byte();
+            assert_ne!(0, value);
+            assert!(
+                !seen[value as usize],
+                "duplicate alpha^{} for generator {FIELD_GENERATOR:#x}",
+                i
+            );
+            seen[value as usize] = true;
+        }
+        assert_eq!(1, Octet::alpha(255).byte());
     }
 }

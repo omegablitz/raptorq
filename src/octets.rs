@@ -286,6 +286,68 @@ fn mulassign_scalar_fallback(octets: &mut [u8], scalar: &Octet) {
     }
 }
 
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
+#[target_feature(enable = "avx2")]
+#[target_feature(enable = "gfni")]
+unsafe fn mulassign_scalar_gfni_avx2(octets: &mut [u8], scalar: &Octet) {
+    unsafe {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let self_avx_ptr = octets.as_mut_ptr();
+        let scalar_vec = _mm256_set1_epi8(scalar.byte() as i8);
+
+        for i in 0..(octets.len() / 32) {
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm256_loadu_si256((self_avx_ptr as *const __m256i).add(i));
+            let result = _mm256_gf2p8mul_epi8(self_vec, scalar_vec);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm256_storeu_si256((self_avx_ptr as *mut __m256i).add(i), result);
+        }
+
+        let remainder = octets.len() % 32;
+        let scalar_index = scalar.byte() as usize;
+        for i in (octets.len() - remainder)..octets.len() {
+            *octets.get_unchecked_mut(i) = *OCTET_MUL
+                .get_unchecked(scalar_index)
+                .get_unchecked(*octets.get_unchecked(i) as usize);
+        }
+    }
+}
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
+#[target_feature(enable = "sse2")]
+#[target_feature(enable = "gfni")]
+unsafe fn mulassign_scalar_gfni_sse2(octets: &mut [u8], scalar: &Octet) {
+    unsafe {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let self_sse_ptr = octets.as_mut_ptr();
+        let scalar_vec = _mm_set1_epi8(scalar.byte() as i8);
+
+        for i in 0..(octets.len() / 16) {
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm_loadu_si128((self_sse_ptr as *const __m128i).add(i));
+            let result = _mm_gf2p8mul_epi8(self_vec, scalar_vec);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm_storeu_si128((self_sse_ptr as *mut __m128i).add(i), result);
+        }
+
+        let remainder = octets.len() % 16;
+        let scalar_index = scalar.byte() as usize;
+        for i in (octets.len() - remainder)..octets.len() {
+            *octets.get_unchecked_mut(i) = *OCTET_MUL
+                .get_unchecked(scalar_index)
+                .get_unchecked(*octets.get_unchecked(i) as usize);
+        }
+    }
+}
+
 // TODO: enable when stable
 #[cfg(all(any(target_arch = "arm", target_arch = "aarch64"), feature = "std"))]
 // #[target_feature(enable = "neon")]
@@ -418,6 +480,16 @@ unsafe fn mulassign_scalar_ssse3(octets: &mut [u8], scalar: &Octet) {
 pub fn mulassign_scalar(octets: &mut [u8], scalar: &Octet) {
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
     {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("gfni") {
+            unsafe {
+                return mulassign_scalar_gfni_avx2(octets, scalar);
+            }
+        }
+        if is_x86_feature_detected!("sse2") && is_x86_feature_detected!("gfni") {
+            unsafe {
+                return mulassign_scalar_gfni_sse2(octets, scalar);
+            }
+        }
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return mulassign_scalar_avx2(octets, scalar);
@@ -455,6 +527,76 @@ fn fused_addassign_mul_scalar_fallback(octets: &mut [u8], other: &[u8], scalar: 
     for (i, octet) in octets.iter_mut().enumerate() {
         unsafe {
             *octet ^= *OCTET_MUL
+                .get_unchecked(scalar_index)
+                .get_unchecked(*other.get_unchecked(i) as usize);
+        }
+    }
+}
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
+#[target_feature(enable = "avx2")]
+#[target_feature(enable = "gfni")]
+unsafe fn fused_addassign_mul_scalar_gfni_avx2(octets: &mut [u8], other: &[u8], scalar: &Octet) {
+    unsafe {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let self_avx_ptr = octets.as_mut_ptr();
+        let other_avx_ptr = other.as_ptr();
+        let scalar_vec = _mm256_set1_epi8(scalar.byte() as i8);
+
+        for i in 0..(octets.len() / 32) {
+            #[allow(clippy::cast_ptr_alignment)]
+            let other_vec = _mm256_loadu_si256((other_avx_ptr as *const __m256i).add(i));
+            let product = _mm256_gf2p8mul_epi8(other_vec, scalar_vec);
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm256_loadu_si256((self_avx_ptr as *const __m256i).add(i));
+            let result = _mm256_xor_si256(self_vec, product);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm256_storeu_si256((self_avx_ptr as *mut __m256i).add(i), result);
+        }
+
+        let remainder = octets.len() % 32;
+        let scalar_index = scalar.byte() as usize;
+        for i in (octets.len() - remainder)..octets.len() {
+            *octets.get_unchecked_mut(i) ^= *OCTET_MUL
+                .get_unchecked(scalar_index)
+                .get_unchecked(*other.get_unchecked(i) as usize);
+        }
+    }
+}
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
+#[target_feature(enable = "sse2")]
+#[target_feature(enable = "gfni")]
+unsafe fn fused_addassign_mul_scalar_gfni_sse2(octets: &mut [u8], other: &[u8], scalar: &Octet) {
+    unsafe {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let self_sse_ptr = octets.as_mut_ptr();
+        let other_sse_ptr = other.as_ptr();
+        let scalar_vec = _mm_set1_epi8(scalar.byte() as i8);
+
+        for i in 0..(octets.len() / 16) {
+            #[allow(clippy::cast_ptr_alignment)]
+            let other_vec = _mm_loadu_si128((other_sse_ptr as *const __m128i).add(i));
+            let product = _mm_gf2p8mul_epi8(other_vec, scalar_vec);
+            #[allow(clippy::cast_ptr_alignment)]
+            let self_vec = _mm_loadu_si128((self_sse_ptr as *const __m128i).add(i));
+            let result = _mm_xor_si128(self_vec, product);
+            #[allow(clippy::cast_ptr_alignment)]
+            _mm_storeu_si128((self_sse_ptr as *mut __m128i).add(i), result);
+        }
+
+        let remainder = octets.len() % 16;
+        let scalar_index = scalar.byte() as usize;
+        for i in (octets.len() - remainder)..octets.len() {
+            *octets.get_unchecked_mut(i) ^= *OCTET_MUL
                 .get_unchecked(scalar_index)
                 .get_unchecked(*other.get_unchecked(i) as usize);
         }
@@ -626,6 +768,16 @@ pub fn fused_addassign_mul_scalar(octets: &mut [u8], other: &[u8], scalar: &Octe
     assert_eq!(octets.len(), other.len());
     #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "std"))]
     {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("gfni") {
+            unsafe {
+                return fused_addassign_mul_scalar_gfni_avx2(octets, other, scalar);
+            }
+        }
+        if is_x86_feature_detected!("sse2") && is_x86_feature_detected!("gfni") {
+            unsafe {
+                return fused_addassign_mul_scalar_gfni_sse2(octets, other, scalar);
+            }
+        }
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return fused_addassign_mul_scalar_avx2(octets, other, scalar);
